@@ -1,35 +1,20 @@
 /**
- * Upload route — receives one or more CSVs as FormData, parses each in memory,
- * merges all transactions, persists aggregates only.
+ * Upload route — receives one or more files as FormData,
+ * parses each in memory, merges all transactions, computes
+ * aggregates in memory, and returns them as JSON.
  *
- * CRITICAL INVARIANT: CSV file Buffers never touch disk.
- * Multiple files (different bank accounts) are merged before aggregation
- * so the dashboard shows a unified view across all accounts.
+ * No database. No auth. No data ever written to disk.
  */
 
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
 import { parseBuffer } from "@/lib/parser";
-import { aggregateAndPersist } from "@/lib/aggregator";
-import { db } from "@/lib/db";
-import { monthlySummaries, vendors } from "@/lib/schema";
-import { desc } from "drizzle-orm";
+import { aggregate } from "@/lib/aggregator";
 import type { TransactionRecord } from "@/lib/parser";
 
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs"; // Required for better-sqlite3
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  // Auth check — only owners can upload
-  try {
-    const session = await requireAuth();
-    if (session.role !== "owner" && session.role !== "collaborator") {
-      return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
-    }
-  } catch {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -37,13 +22,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid form data" }, { status: 400 });
   }
 
-  // Accept multiple files under the same "file" key
   const files = formData.getAll("file") as File[];
   if (!files.length) {
     return NextResponse.json({ error: "No file provided" }, { status: 400 });
   }
 
-  // Parse each file in memory and merge all transactions
   let allTransactions: TransactionRecord[] = [];
   let totalRows = 0;
   const parseErrors: string[] = [];
@@ -53,17 +36,17 @@ export async function POST(request: Request) {
     monthsCovered: string;
   }> = [];
 
-  for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
-    const file = files[fileIdx];
-    // Read into Buffer — stays in RAM, never written to disk
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
     try {
       const result = await parseBuffer(buffer, file.name);
-      // Tag each transaction with its source account index so the aggregator
-      // can sum closing balances across accounts correctly.
-      const tagged = result.transactions.map((tx) => ({ ...tx, accountIdx: fileIdx }));
+      const tagged = result.transactions.map((tx) => ({
+        ...tx,
+        accountIdx: i,
+      }));
       allTransactions = allTransactions.concat(tagged);
       totalRows += result.totalRows;
       fileResults.push({
@@ -78,7 +61,6 @@ export async function POST(request: Request) {
     }
   }
 
-  // If every file failed to parse, return an error
   if (allTransactions.length === 0 && fileResults.length === 0) {
     return NextResponse.json(
       { error: `All files failed to parse. ${parseErrors.join(" | ")}` },
@@ -86,53 +68,30 @@ export async function POST(request: Request) {
     );
   }
 
-  const processedRows = allTransactions.length;
-
-  // Sort merged transactions by date so closing-balance logic is correct
+  // Sort by date before aggregating
   allTransactions.sort((a, b) => a.date.localeCompare(b.date));
 
-  // Persist aggregates only
-  let aggregateResult;
-  try {
-    aggregateResult = aggregateAndPersist(allTransactions, totalRows);
-  } catch (err) {
-    console.error("Aggregation error:", err);
-    return NextResponse.json({ error: "Failed to process data" }, { status: 500 });
-  } finally {
-    // CRITICAL: Discard transaction array regardless of outcome
-    allTransactions = null as unknown as typeof allTransactions;
-  }
+  const { monthlySummaries, vendors } = aggregate(allTransactions);
 
-  // Quick summary for the response
-  const latestMonth = await db
-    .select()
-    .from(monthlySummaries)
-    .orderBy(desc(monthlySummaries.month))
-    .limit(1)
-    .get();
+  // Discard transactions — only aggregates leave this function
+  allTransactions = null as unknown as typeof allTransactions;
 
-  const topVendor = await db
-    .select()
-    .from(vendors)
-    .orderBy(desc(vendors.totalSpend))
-    .limit(1)
-    .get();
+  const allMonths = monthlySummaries.map((s) => s.month).sort();
+  const monthsCovered =
+    allMonths.length > 0
+      ? `${allMonths[0]} to ${allMonths[allMonths.length - 1]}`
+      : "no data";
 
   return NextResponse.json({
     success: true,
-    summary: {
+    monthlySummaries,
+    vendors,
+    meta: {
       filesProcessed: fileResults.length,
-      totalRowsInFiles: totalRows,
-      processedRows,
+      processedRows: totalRows,
+      monthsCovered,
       fileResults,
       parseErrors: parseErrors.length > 0 ? parseErrors : undefined,
-      monthsInDashboard: aggregateResult.monthsWritten,
-      vendorsTracked: aggregateResult.vendorsWritten,
-      latestMonth: latestMonth?.month ?? null,
-      latestClosingBalance: latestMonth?.closingBalance ?? null,
-      topVendorAlias: topVendor?.displayAlias ?? null,
     },
-    privacyNote:
-      "Your bank statements were processed in memory and were not stored. Only monthly totals and anonymous vendor summaries were saved.",
   });
 }

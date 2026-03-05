@@ -12,7 +12,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import type { MonthlySummary } from "@/lib/schema";
+import type { MonthlySummary } from "@/lib/types";
 import { formatMonth } from "@/lib/analytics";
 
 export type BurnViewMode = "all" | "burn" | "inflows" | "net" | "avg";

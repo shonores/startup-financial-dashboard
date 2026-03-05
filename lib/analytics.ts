@@ -3,7 +3,7 @@
  * Reads from monthly_summaries and vendors tables only.
  */
 
-import type { MonthlySummary, Vendor } from "./schema";
+import type { MonthlySummary, Vendor } from "./types";
 
 export interface RunwayMetrics {
   currentCash: number;

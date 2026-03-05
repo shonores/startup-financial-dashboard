@@ -8,7 +8,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import type { CategorySplit } from "@/lib/schema";
+import type { CategorySplit } from "@/lib/types";
 
 const COLORS = [
   "#3b82f6",
