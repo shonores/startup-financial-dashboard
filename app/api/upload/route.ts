@@ -6,6 +6,10 @@
  * No database. No auth. No data ever written to disk.
  */
 
+export const config = {
+  api: { bodyParser: { sizeLimit: "50mb" } },
+};
+
 import { NextResponse } from "next/server";
 import { parseBuffer } from "@/lib/parser";
 import { aggregate } from "@/lib/aggregator";
